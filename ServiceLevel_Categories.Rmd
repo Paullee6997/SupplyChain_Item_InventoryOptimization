@@ -1,0 +1,552 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readxl)
+library(dummies)
+library(lubridate)
+library(reshape2)
+library(stringr)
+library(corrplot)
+library(fastDummies)
+library(Boruta)
+library(plotly)
+library(rpivotTable)
+```
+
+
+#VELOCITY CHECK to make sure the categories set by fast moving
+#Can we determine whether items are correctly labeled VELOCITY - how would i classify them?
+#Define the logic for classifying velocity and service level ( A=Weekly, B=Monthly, C=Yearly, D=NoDemand)
+#Dont define logic randomnly look to google and do research to see what industry standard is
+#Check criticality too
+#number of SKUs in each combination
+
+
+For every item get unit cost multiply by sum storeroom issues sort desc - Cost
+For every item get count storeroom issues sort desc - Velocity(Consumption)
+
+This below is the code to track and categorize based on cost currently focusing on consumption only
+
+```{r}
+#all_costs <- sum(df2$Total_cost)
+#cutoff_holder <- 0.0
+#for (id in df2$INV_ITEM_ID){
+#  if (cutoff_holder <= all_costs*0.7){
+#    a_id_cutoff <- id
+#  }
+#  cutoff_holder <- cutoff_holder + df2$Total_cost[which(df2$INV_ITEM_ID == id)]
+#}
+#cost_deciles <- quantile(test_mapping$Total_cost, probs = seq(0,1,by=0.1)) # deciles for costs
+#cons_deciles <- quantile(test_mapping$Sum_SR_Issues, probs = seq(0,1,by=0.1)) # deciles for consumption
+```
+
+A = top 70% for both issue count and cost count
+B = 70 > x <= 90 for both issue count and cost count
+C = last 10% for both issue and cost counts
+Critical 1 
+Critical 2
+Critical 3
+
+get item_id and associated costs/consumption 
+  for loop sum costs/consump untill hit cuttoff pecentage number
+  Keep item_ids and mutate based on matching ids
+  
+
+```{r}
+#Aggregated Item level data for df2
+df2 <- read_excel("/Users/kingg/Desktop/TrinityHealth/mergedata.xlsx")
+colnames(df2)[1] <- "INV_ITEM_ID"
+#BELOW I PREPROCESS TO CREATE NEW CATEGORIES BASED ON CONSUMPTION
+
+df2 <- df2 %>%
+  mutate(Total_cost = Sum_SR_Issues*UNIT_COST)
+
+all_issues <- sum(df2$Sum_SR_Issues)
+df2$Sum_SR_Issues <- sort(df2$Sum_SR_Issues, decreasing=TRUE)
+
+ggplot(df2, aes(reorder(INV_ITEM_ID, Sum_SR_Issues),Sum_SR_Issues )) + 
+  geom_bar(stat="identity", fill="lightblue") +
+  geom_vline(xintercept = which.min(abs(sort(df2$Sum_SR_Issues,decreasing=FALSE) - quantile(df2$Sum_SR_Issues,0.7)))) +
+  geom_vline(xintercept = which.min(abs(sort(df2$Sum_SR_Issues,decreasing=FALSE) - quantile(df2$Sum_SR_Issues,0.9)))) +
+  theme_bw() +
+  theme(axis.text.x=element_text(size = 0.001, angle=-90, vjust=0.5,hjust=0)) +
+  ggtitle("Cumulative Frequency of StoreRoom Order Sums for every by Item")
+
+ggplot(df2, aes(reorder(INV_ITEM_ID, Count_SR_Issues),Count_SR_Issues )) + 
+  geom_bar(stat="identity", fill="lightblue") +
+  geom_vline(xintercept = which.min(abs(sort(df2$Count_SR_Issues,decreasing=FALSE) - quantile(df2$Count_SR_Issues,0.7)))) +
+  geom_vline(xintercept = which.min(abs(sort(df2$Count_SR_Issues,decreasing=FALSE) - quantile(df2$Count_SR_Issues,0.9)))) +
+  theme_bw() +
+  theme(axis.text.x=element_text(size = 0.001, angle=-90, vjust=0.5,hjust=0)) +
+  ggtitle("Cumulative Frequency of StoreRoom Order Counts for every by Item")
+
+#Creating the cutoff index for A,B,C by consumption calculated from Sum of Sum_SR_Issues
+
+#A are items with largest SR_Issues and repersent 70% of ALL SR Issues
+a_id_cutoff <- 0
+cons_holder <- 0.0
+for (id in df2$INV_ITEM_ID){
+  if (cons_holder <= all_issues*0.7){
+    a_id_cutoff <- id
+  }
+  cons_holder <- cons_holder +df2$Sum_SR_Issues[which(df2$INV_ITEM_ID == id)]
+}
+a_index_cut <- which(df2$INV_ITEM_ID == a_id_cutoff)
+a_index_cut
+a_total_issues <- sum(df2$Sum_SR_Issues[1:86])
+
+#B are items with the next largest SR_Issues and repersent 70% < x <= 90% of ALL SR Issues
+b_id_cutoff <- 0
+cons_holder <- 0.0
+for (id in df2$INV_ITEM_ID){
+  if (cons_holder <= all_issues*0.9 & cons_holder > all_issues*0.7){
+    b_id_cutoff <- id
+  }
+  cons_holder <- cons_holder +df2$Sum_SR_Issues[which(df2$INV_ITEM_ID == id)]
+}
+b_index_cut <- which(df2$INV_ITEM_ID == b_id_cutoff)
+b_index_cut
+b_total_issues <- sum(df2$Sum_SR_Issues[87:b_index_cut])
+
+#c are items with the smallest SR_Issues and repersent 90% < x <= 100% of ALL SR Issues
+c_id_cutoff <- 0
+cons_holder <- 0.0
+for (id in df2$INV_ITEM_ID){
+  if (cons_holder <= all_issues*1 & cons_holder > all_issues*0.9){
+    c_id_cutoff <- id
+  }
+  cons_holder <- cons_holder +df2$Sum_SR_Issues[which(df2$INV_ITEM_ID == id)]
+}
+c_index_cut <- which(df2$INV_ITEM_ID == c_id_cutoff)
+c_index_cut
+c_total_issues <- sum(df2$Sum_SR_Issues[246:c_index_cut])
+
+
+df2 <- df2 %>%
+  mutate(Consume_Groups = ifelse((as.numeric(rownames(df2)) <= a_index_cut) == TRUE, "A", 
+                            ifelse((as.numeric(rownames(df2)) <= b_index_cut & as.numeric(rownames(df2)) > a_index_cut) == TRUE, "B",
+                                   ifelse((as.numeric(rownames(df2)) <= c_index_cut & as.numeric(rownames(df2)) > b_index_cut) == TRUE, "C","NoGroup"))))
+  
+
+
+#BELOW I COMPLETE THE MERGE BETWEEN AGGREGATED ITEM LEVEL DATA df2 and TRANSACTIONAL ORDER DATE df
+df <- read_excel("/Users/kingg/Desktop/TrinityHealth/ltdata.xlsx")
+#merged_df <- merge(x=df,y=df2,by="INV_ITEM_ID")
+
+#BELOW I COMPLETE MERGE TO ADD ON CRITICALITY LEVELS BY FAMILY GROUP
+
+critical_df <- read_excel("/Users/kingg/Desktop/TrinityHealth/Criticality.xlsx")
+colnames(critical_df)[1] <- "Family_Group"
+
+final_df <- merge(x=df2, y=critical_df, by="Family_Group")
+colnames(final_df)[16] <- "Daily_Demand"
+
+rpivotTable(final_df,rows="Criticality", cols=c("A","B","C"),width="100%", height="400px")
+
+
+#BELOW I WILL BE GROUPING COMBINATIONS OF CRITICALITY AND CONSUMPTION GROUPS
+#INTO 3 CATEGORYS
+
+
+final_df$Criticality <- str_sub(final_df$Criticality, 1, 1)
+
+final_df <- final_df %>% 
+  mutate(Category = ifelse(Consume_Groups == "A" | Criticality == "3", "1",
+                           ifelse((Consume_Groups=="B"&Criticality=="2")|(Consume_Groups=="B"&Criticality=="1")|(Consume_Groups=="C"&Criticality=="2"),"2",
+                                  ifelse(Consume_Groups=="C"&Criticality=="1","3","Error")
+                                  )))
+
+final_df <- final_df %>%
+  filter(ACTION != "REMOVE")
+
+
+#write.csv(final_df, "/Users/kingg/Desktop/TrinityHealth/Final_Merged_df.csv")
+```
+
+
+For the different Categorys made CHANGE SERVICE LEVELS
+zscore of 1.28 = 90%
+zscore of 3.49 = 99%
+Category 1 95-99.99
+Category 2 92-97
+Category 3 90-95
+
+```{r}
+plot(ecdf(final_df$Sum_SR_Issues), main="Cumulative Distribution Chart for Items Total Item Counts")
+qqnorm(final_df$Sum_SR_Issues, main="Normality Test for All Items Total Item Counts")
+
+zscores_cat1 <- seq(1.65, 3.49, by=0.01)
+zscores_cat2 <- seq(1.40, 1.88, by=0.01)
+zscores_cat3 <- seq(1.28, 1.65, by=0.01)
+
+#FOR CATEGORY 1 ITEMS calculating safety stock,ROP,MAX
+
+cat1 <- final_df %>%
+  filter(Category == 1)
+
+qqnorm(cat1$Sum_SR_Issues, main="Normality Test for Category 1 Total Item Counts")
+
+
+volatility_SS <- sqrt(cat1$LEADTIME_MODE*(cat1$DAILY_DEMAND_STDEV^2)+(cat1$Daily_Demand^2)*(cat1$LEADTIME_STDEV^2))
+
+#Picking the best service level score based minimzing total inventory on hand
+
+current_SS <- 1.65*volatility_SS
+new_SS <- 0.0
+new_zscore <- 0.0
+for(zscore in zscores_cat1){
+  new_SS <- zscore*volatility_SS
+  if(sum(new_SS, na.rm=TRUE) < sum(current_SS, na.rm=TRUE)){
+    current_SS <- new_SS
+    new_zscore <- zscore
+  }
+}
+
+new_zscore
+
+#FOR PRESENTATION EXAMPLE HARDCODING IN SERVICE LEVEL FOR NEW SAFETY STOCK
+current_SS <- 1.88*volatility_SS
+
+#CALCULATING NEW VARIABLES for CATEGORY 1
+
+current_min_rop <- 1.65*volatility_SS+(cat1$Daily_Demand*cat1$LEADTIME_MODE)
+new_min_rop <- current_SS+(cat1$Daily_Demand*cat1$LEADTIME_MODE)
+
+current_roq <- ceiling((cat1$Daily_Demand*4)/cat1$PUOM_MULTIPLIER)*cat1$PUOM_MULTIPLIER
+
+current_max <- current_min_rop+current_roq
+new_max <- new_min_rop+current_roq
+
+cat1_minmax_diff <- data.frame(cat1$INV_ITEM_ID, cat1$UNIT_COST, current_min_rop, new_min_rop, current_max, new_max)
+cat1_minmax_diff <- cat1_minmax_diff %>%
+  mutate(min_cost_diff = cat1.UNIT_COST*(new_min_rop-current_min_rop)) %>%
+  mutate(max_cost_diff = cat1.UNIT_COST*(new_max-current_max))
+```
+
+
+```{r}
+cat2 <- final_df %>%
+  filter(Category == 2)
+
+qqnorm(cat1$Sum_SR_Issues, main="Normality Test for Category 2 Total Item Counts")
+
+
+volatility_SS <- sqrt(cat2$LEADTIME_MODE*(cat2$DAILY_DEMAND_STDEV^2)+(cat2$Daily_Demand^2)*(cat2$LEADTIME_STDEV^2))
+
+#Picking the best service level score based minimzing total inventory on hand
+
+current_SS <- 1.65*volatility_SS
+new_ss <- 0.0
+new_zscore <- 0.0
+for(zscore in zscores_cat2){
+  new_SS <- zscore*volatility_SS
+  if(sum(new_SS, na.rm=TRUE) < sum(current_SS, na.rm=TRUE)){
+    current_SS <- new_SS
+    new_zscore <- zscore
+  }
+}
+
+new_zscore
+
+#FOR PRESENTATION EXAMPLE HARDCODING IN SERVICE LEVEL FOR NEW SAFETY STOCK
+current_SS <- 1.18*volatility_SS
+
+#CALCULATING NEW VARIABLES for CATEGORY 2
+
+current_min_rop <- 1.65*volatility_SS+(cat2$Daily_Demand*cat2$LEADTIME_MODE)
+new_min_rop <- current_SS+(cat2$Daily_Demand*cat2$LEADTIME_MODE)
+
+current_roq <- ceiling((cat2$Daily_Demand*4)/cat2$PUOM_MULTIPLIER)*cat2$PUOM_MULTIPLIER
+
+current_max <- current_min_rop+current_roq
+new_max <- new_min_rop+current_roq
+
+cat2_minmax_diff <- data.frame(cat2$INV_ITEM_ID, cat2$UNIT_COST, current_min_rop, new_min_rop, current_max, new_max)
+cat2_minmax_diff <- cat2_minmax_diff %>%
+  mutate(min_cost_diff = cat2.UNIT_COST*(new_min_rop-current_min_rop)) %>%
+  mutate(max_cost_diff = cat2.UNIT_COST*(new_max-current_max))
+```
+
+
+```{r}
+cat3 <- final_df %>%
+  filter(Category == 3)
+
+qqnorm(cat3$Sum_SR_Issues, main="Normality Test for Category 3 Total Item Counts")
+
+
+volatility_SS <- sqrt(cat3$LEADTIME_MODE*(cat3$DAILY_DEMAND_STDEV^2)+(cat3$Daily_Demand^2)*(cat3$LEADTIME_STDEV^2))
+
+#Picking the best service level score based minimzing total inventory on hand
+
+current_SS <- 1.65*volatility_SS
+new_ss <- 0.0
+new_zscore <- 0.0
+for(zscore in zscores_cat3){
+  new_SS <- zscore*volatility_SS
+  if(sum(new_SS, na.rm=TRUE) < sum(current_SS, na.rm=TRUE)){
+    current_SS <- new_SS
+    new_zscore <- zscore
+  }
+}
+
+new_zscore
+
+#FOR PRESENTATION EXAMPLE HARDCODING IN SERVICE LEVEL FOR NEW SAFETY STOCK
+current_SS <- 1.04*volatility_SS
+
+#CALCULATING NEW VARIABLES for CATEGORY 2
+
+current_min_rop <- 1.65*volatility_SS+(cat3$Daily_Demand*cat3$LEADTIME_MODE)
+new_min_rop <- current_SS+(cat3$Daily_Demand*cat3$LEADTIME_MODE)
+
+current_roq <- ceiling((cat3$Daily_Demand*4)/cat3$PUOM_MULTIPLIER)*cat3$PUOM_MULTIPLIER
+
+current_max <- current_min_rop+current_roq
+new_max <- new_min_rop+current_roq
+
+cat3_minmax_diff <- data.frame(cat3$INV_ITEM_ID, cat3$UNIT_COST, current_min_rop, new_min_rop, current_max, new_max)
+cat3_minmax_diff <- cat3_minmax_diff %>%
+  mutate(min_cost_diff = cat3.UNIT_COST*(new_min_rop-current_min_rop)) %>%
+  mutate(max_cost_diff = cat3.UNIT_COST*(new_max-current_max))
+```
+
+```{r}
+print(sum(cat1_minmax_diff$min_cost_diff,na.rm=TRUE))
+print(sum(cat2_minmax_diff$min_cost_diff,na.rm=TRUE))
+print(sum(cat3_minmax_diff$min_cost_diff,na.rm=TRUE))
+
+print(sum(cat1_minmax_diff$min_cost_diff,cat2_minmax_diff$min_cost_diff,cat3_minmax_diff$min_cost_diff,na.rm=TRUE))
+
+```
+
+
+
+```{r}
+all_zscores <- seq(0.84, 3.49, by=0.01)
+
+all_sl <- c()
+for (zscore in all_zscores){
+  all_sl <- c(all_sl, (1-pnorm(q=zscore, lower.tail=FALSE)))
+}
+
+volatility_SS_cat1 <- sqrt(cat1$LEADTIME_MODE*(cat1$DAILY_DEMAND_STDEV^2)+(cat1$Daily_Demand^2)*(cat1$LEADTIME_STDEV^2))
+current_min_rop_cat1 <- 1.65*volatility_SS_cat1+(cat1$Daily_Demand*cat1$LEADTIME_MODE)
+
+cost_diffs_cat1 <- c()
+for (zscore in all_zscores){
+  sl_i_SS_cat1 <- zscore*volatility_SS_cat1
+  cost_diffs_cat1 <- c(cost_diffs_cat1, sum(cat1$UNIT_COST*(sl_i_SS_cat1+(cat1$Daily_Demand*cat1$LEADTIME_MODE)) - cat1$UNIT_COST*current_min_rop_cat1, na.rm=TRUE) )
+}
+
+volatility_SS_cat2 <- sqrt(cat2$LEADTIME_MODE*(cat2$DAILY_DEMAND_STDEV^2)+(cat2$Daily_Demand^2)*(cat2$LEADTIME_STDEV^2))
+current_min_rop_cat2 <- 1.65*volatility_SS_cat2+(cat2$Daily_Demand*cat2$LEADTIME_MODE)
+
+cost_diffs_cat2 <- c()
+for (zscore in all_zscores){
+  sl_i_SS_cat2 <- zscore*volatility_SS_cat2
+  cost_diffs_cat2 <- c(cost_diffs_cat2, sum(cat2$UNIT_COST*(sl_i_SS_cat2+(cat2$Daily_Demand*cat2$LEADTIME_MODE)) - cat2$UNIT_COST*current_min_rop_cat2, na.rm=TRUE) )
+}
+
+volatility_SS_cat3 <- sqrt(cat3$LEADTIME_MODE*(cat3$DAILY_DEMAND_STDEV^2)+(cat3$Daily_Demand^2)*(cat3$LEADTIME_STDEV^2))
+current_min_rop_cat3 <- 1.65*volatility_SS_cat3+(cat3$Daily_Demand*cat3$LEADTIME_MODE)
+
+cost_diffs_cat3 <- c()
+for (zscore in all_zscores){
+  sl_i_SS_cat3 <- zscore*volatility_SS_cat3
+  cost_diffs_cat3 <- c(cost_diffs_cat3, sum(cat3$UNIT_COST*(sl_i_SS_cat3+(cat3$Daily_Demand*cat3$LEADTIME_MODE)) - cat3$UNIT_COST*current_min_rop_cat3, na.rm=TRUE) )
+}
+
+costs_sl_df <- data.frame(all_zscores, all_sl, cost_diffs_cat1,cost_diffs_cat2,cost_diffs_cat3)
+
+#write.csv(costs_sl_df, "/Users/kingg/Desktop/TrinityHealth/ChangingCosts_AtServiceLevels.csv")
+
+final_df <-  final_df %>%
+  mutate(Consumption_Criticality = paste(final_df$Consume_Groups, as.character(final_df$Criticality)))
+
+#write.csv(final_df, "/Users/kingg/Desktop/TrinityHealth/Item_Category_Data.csv")
+```
+
+
+What does changing service level mean to the business beyond just changing inventory costs?
+
+Main purpose of safety stock to account for volatility in DEMAND and LEAD TIME
+
+Change in service levels lead to change in higher/lower safety stock
+  Compare the safety stock to current safety stock
+  What is impact beyond the cost implications
+
+
+Look at Items by their warehouse locations in rows where based on velocity 10% of items all sit in one location 
+Should they be ROP/ROQ or Min/Max
+
+```{r}
+
+rpivotTable(final_df,rows="Criticality", cols=c("A","B","C"),width="100%", height="400px")
+```
+
+
+```{r}
+colnames(cat1_minmax_diff)[1:2] <- c("INV_ITEM_ID","UNIT_COST")
+colnames(cat2_minmax_diff)[1:2] <- c("INV_ITEM_ID","UNIT_COST")
+colnames(cat3_minmax_diff)[1:2] <- c("INV_ITEM_ID","UNIT_COST")
+
+rada_rada <- rbind(cat1_minmax_diff, cat2_minmax_diff, cat3_minmax_diff)
+
+inv_diff_df <- merge(x=final_df, y=rada_rada, by="INV_ITEM_ID")
+inv_diff_df <- inv_diff_df %>%
+  select(INV_ITEM_ID, Family_Group, ITEM_DESCRIPTION, VENDOR_VNAME, UNIT_COST.x, Consumption_Criticality, Category, ROW, BIN, Suggested_MIN, new_min_rop)
+
+inv_diff_df$new_min_rop <- round(inv_diff_df$new_min_rop)
+
+inv_diff_df <- inv_diff_df %>%
+  mutate(Inventory_diff = new_min_rop-Suggested_MIN)
+
+#write.csv(inv_diff_df,"/Users/kingg/Desktop/TrinityHealth/Item_InventoryChanges.csv")
+```
+
+
+Periodic Review or Perpetual Review
+Periodic looks at every set time period and reorders to certain max level - Typical reasoning for this model is ease of use
+  Suggest items to be put into periodic review
+  What is time period for these items to be reviewed
+  What is the minimum and the maximum
+  Are there minimum order quantites that must be satisfied?
+  
+If there is low frequency of orders and not essential
+  Minimum level how many days of inventory do they want on hand at all times - Safety Stock + Consumption during lt
+  Max=the space allocated for the item in its shelf
+
+Perpetual continous montioring of inventory levels where when rop hit you order roq
+
+
+```{r}
+row_gg <- final_df %>%
+  filter(ROW=="GG")
+
+row_issue_sums <- final_df %>%
+  group_by(ROW) %>%
+  summarise(
+    sum_issues = sum(Sum_SR_Issues, na.rm=TRUE),
+    mean_issues = mean(Sum_SR_Issues, na.rm=TRUE),
+    median_issues = median(Sum_SR_Issues, na.rm=TRUE),
+    std_issues = sd(Sum_SR_Issues, na.rm=TRUE),
+    var_issues = std_issues^2,
+    count_items = n()
+  )
+
+ggplot(data=row_issue_sums, aes(x=ROW,y=sum_issues)) +
+  geom_count()
+ggplot(data=row_gg, aes(x=as.factor(INV_ITEM_ID),y=Sum_SR_Issues)) +
+  theme(axis.text.x = element_text(face="bold", color="#993333",size=5, angle=90)) +
+  geom_col() 
+qqnorm(row_gg$Sum_SR_Issues, main="Normality Test for Row GG Total Item Issues")
+
+head(cluster_df)
+```
+
+Gower Distance Clustering 
+
+
+```{r}
+library(cluster)
+#install.packages(("Rtsne"))
+library(Rtsne)
+
+cluster_df <- final_df
+cols <-  colnames(final_df)[3:29]
+cols <- c("INV_ITEM_ID", "Family_Group", cols)
+cols
+cluster_df <- final_df[cols] 
+
+cluster_df <- cluster_df %>%
+  select(-INV_ITEM_ID, -ITEM_DESCRIPTION, -PACKAGING_STRING, -VENDOR_VNAME, -PUOM_MULTIPLIER, -BIN, -DAILY_DEMAND_STDEV, -LEADTIME_STDEV, -ACTION, -Days_Active)
+
+cluster_df <- cluster_df %>%
+  mutate_if(is.character, funs(as.factor(.)))
+
+gower_dist <- daisy(cluster_df, metric="gower")
+gower_mat <- as.matrix(gower_dist)
+
+cluster_df[which(gower_mat == min(gower_mat[gower_mat != min(gower_mat)]), arr.ind = TRUE)[1, ], ]
+
+cluster_df[which(gower_mat == max(gower_mat[gower_mat != max(gower_mat)]), arr.ind = TRUE)[1, ], ]
+
+sil_width <- c(NA)
+for(i in 2:8){  
+  pam_fit <- pam(gower_dist, diss = TRUE, k = i)  
+  sil_width[i] <- pam_fit$silinfo$avg.width  
+}
+plot(1:8, sil_width,
+     xlab = "Number of clusters",
+     ylab = "Silhouette Width")
+lines(1:8, sil_width)
+#SELECT 4 CLUSTERS
+
+
+```
+
+
+
+```{r}
+k <- 4
+#k-mediods model for clustering based on optimal num clusters for max sil coefficient
+pam_fit <- pam(gower_dist, diss = TRUE, k)
+pam_results <- cluster_df %>%
+  mutate(cluster = pam_fit$clustering) %>%
+  group_by(cluster) %>%
+  do(the_summary = summary(.))
+pam_results$the_summary
+```
+
+
+
+
+```{r}
+cluster_df[pam_fit$cluster==2,]
+```
+
+
+
+
+```{r}
+tsne_obj <- Rtsne(gower_dist, is_distance = TRUE)
+tsne_data <- tsne_obj$Y %>%
+  data.frame() %>%
+  setNames(c("X", "Y")) %>%
+  mutate(cluster = factor(pam_fit$clustering))
+ggplot(aes(x = X, y = Y), data = tsne_data) +
+  geom_point(aes(color = cluster))
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
